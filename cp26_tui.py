@@ -163,20 +163,22 @@ KNOWN_SERVICES = {
 }
 
 KNOWN_CHARS = {
-    "00002a00": "Device Name",
-    "00002a01": "Appearance",
+    "00002a00": "Device Name", # correct
+    "00002a01": "Appearance", # is just x00 x00 
     "00002a04": "Peripheral Params",
-    "00002a05": "Service Changed",
+    "00002a05": "Service Changed", # No idea what this is.. 01 00 ff ff
     "00002a19": "Battery Level",
-    "00002a29": "Manufacturer",
-    "00002a24": "Model Number",
+    "00002a29": "Manufacturer", # correct
+    "00002a50": "Model Number 2", #correct
+    "00002a24": "Model Number", #correct
+    "00002a23": "Model Name", #correct
     "00002a25": "Serial Number",
-    "00002a26": "Firmware Rev",
+    "00002a26": "Firmware Rev", # correct
     "00002a27": "Hardware Rev",
-    "00002a28": "Software Rev",
+    "00002a28": "Software Rev", # correct
     "6e400002": "UART TX",
     "6e400003": "UART RX",
-    "0000ffe1": "Serial N+W",      # DX-BT24: Notify+Write
+    "0000ffe1": "Serial N+W",      # DX-BT24: Notify+Write - 
     "0000ffe2": "Serial Write",    # DX-BT24: Write only
     "0000fff1": "Custom TX",
     "0000fff2": "Custom RX",
@@ -261,7 +263,7 @@ class CP26TuiApp:
         self.setup_editing: bool = False
         self.setup_edit_value: str = ""
         self.setup_name: str = "NewDevice"
-        self.setup_baud: BaudRate = BaudRate.B9600
+        self.setup_baud: BaudRate = BaudRate.B19200
         self.setup_running: bool = False
         self.setup_log: deque = deque(maxlen=20)
 
@@ -345,6 +347,21 @@ class CP26TuiApp:
             self.set_status(f"Connected! Discovering services...")
             await self.discover_characteristics()
             await self.read_config()
+            
+            # Auto-enable notifications on RX channels
+            if self.module_channel.rx_uuid:
+                try:
+                    await self.client.start_notify(self.module_channel.rx_uuid, self.module_notification_handler)
+                    self.module_channel.notifications_enabled = True
+                except Exception:
+                    pass
+            if self.host_channel.rx_uuid:
+                try:
+                    await self.client.start_notify(self.host_channel.rx_uuid, self.host_notification_handler)
+                    self.host_channel.notifications_enabled = True
+                except Exception:
+                    pass
+            
             self.current_screen = "interview"
             
             # Build status message about auto-assignments
@@ -354,7 +371,7 @@ class CP26TuiApp:
             if self.host_channel.tx_char or self.host_channel.rx_char:
                 assignments.append("Host")
             if assignments:
-                self.set_status(f"Auto-assigned: {', '.join(assignments)}. Press 'c' for console or adjust assignments.")
+                self.set_status(f"Auto-assigned: {', '.join(assignments)}. Notifications ON. Press F3 for console.")
             else:
                 self.set_status(f"Found {len(self.characteristics)} chars. Assign TX/RX manually.")
         except Exception as e:
@@ -536,14 +553,14 @@ class CP26TuiApp:
         self.set_status("AT mode flag OFF. (Module stays in current mode)")
 
     async def write_config_command(self, command: str):
-        """Send a configuration command to the device"""
+        """Send a configuration command to the connected module (via Host channel)"""
         if not self.client:
             self.set_status("Not connected")
             return False
 
-        tx_uuid = self.module_channel.tx_uuid
+        tx_uuid = self.host_channel.tx_uuid  # FFE2 - AT commands to module itself
         if not tx_uuid:
-            self.set_status("No TX characteristic assigned to Module channel")
+            self.set_status("No TX characteristic assigned to Host channel")
             return False
 
         try:
@@ -678,8 +695,10 @@ class CP26TuiApp:
                     return
                 data = bytes.fromhex(text_clean)
             else:
-                data = text.encode("utf-8")
 
+                data = (text + "\r\n").encode("utf-8")
+
+            # MARK  Writing console input to BLE characteristic
             await self.client.write_gatt_char(tx_uuid, data)
 
             ts = self.get_timestamp()
@@ -1205,18 +1224,18 @@ class CP26TuiApp:
         self.setup_field_idx = 0
         self.setup_editing = False
         self.setup_edit_value = ""
-        self.setup_name = "NewDevice"
-        self.setup_baud = BaudRate.B9600
+        self.setup_name = "KozyOps"
+        self.setup_baud = BaudRate.B19200
         self.setup_running = False
         self.setup_log = deque(maxlen=20)
-        self.set_status("Setup wizard: Configure new module via passthrough serial")
+        self.set_status("Setup wizard: Configure the connected module")
 
     def draw_setup_screen(self):
         """Draw the setup wizard screen"""
         self.height, self.width = self.stdscr.getmaxyx()
         self.stdscr.clear()
 
-        title = "Setup New Module (via Passthrough)"
+        title = "Setup Connected Module"
         self.safe_addstr(0, 0, title, curses.A_BOLD)
         
         if self.setup_step == 0:
@@ -1225,9 +1244,9 @@ class CP26TuiApp:
             self.safe_addstr(1, 0, help_line, curses.A_DIM)
             
             row = 3
-            self.safe_addstr(row, 0, "This wizard sends AT commands through the connected", curses.A_DIM)
+            self.safe_addstr(row, 0, "This wizard sends AT commands to configure the", curses.A_DIM)
             row += 1
-            self.safe_addstr(row, 0, "module to configure another module on its serial port.", curses.A_DIM)
+            self.safe_addstr(row, 0, "directly connected DX-BT24 module.", curses.A_DIM)
             row += 2
             
             # Show TX channel being used
@@ -1238,7 +1257,7 @@ class CP26TuiApp:
             
             self.safe_addstr(row, 0, "─" * min(50, self.width - 1))
             row += 1
-            self.safe_addstr(row, 0, "New Module Settings:", curses.A_BOLD)
+            self.safe_addstr(row, 0, "Module Settings:", curses.A_BOLD)
             row += 1
             
             fields = [
@@ -1270,7 +1289,7 @@ class CP26TuiApp:
             commands = [
                 f"AT+NAME{self.setup_name}",
                 f"AT+BAUD{baud_code}",
-                "AT+APPAT=1  (enable BLE AT commands)",
+                # "AT+APPAT=1  (enable BLE AT commands)",
                 "AT+RESET    (save & restart)",
             ]
             for cmd in commands:
@@ -1328,9 +1347,9 @@ class CP26TuiApp:
                 row += 1
             
             row += 1
-            self.safe_addstr(row, 0, "The target module should now restart with new settings.")
+            self.safe_addstr(row, 0, "The module should now restart with new settings.")
             row += 1
-            self.safe_addstr(row, 0, "You can scan for it with its new name after a few seconds.")
+            self.safe_addstr(row, 0, "Reconnect after a few seconds to verify the changes.")
 
         self.draw_status_bar()
         self.stdscr.refresh()
@@ -1387,7 +1406,7 @@ class CP26TuiApp:
                 self.set_status("Setup complete. Scan for the new device.")
 
     async def _run_setup_wizard(self):
-        """Execute the setup wizard commands"""
+        """Execute AT commands to configure the directly connected module"""
         if not self.client or not self.module_channel.tx_uuid:
             self.set_status("Error: No TX channel assigned!")
             return
@@ -1402,11 +1421,11 @@ class CP26TuiApp:
         commands = [
             ("Set Name", f"AT+NAME{self.setup_name}"),
             ("Set Baud", f"AT+BAUD{baud_code}"),
-            ("Enable APPAT", "AT+APPAT=1"),
+            #("Enable APPAT", "AT+APPAT=1"),
             ("Save & Reset", "AT+RESET"),
         ]
         
-        self.setup_log.append("Starting setup...")
+        self.setup_log.append("Configuring connected module...")
         self.draw_setup_screen()
         await asyncio.sleep(0.1)
         
@@ -1426,7 +1445,7 @@ class CP26TuiApp:
         
         self.setup_log.append("")
         self.setup_log.append("─" * 30)
-        self.setup_log.append("Setup commands sent!")
+        self.setup_log.append("Configuration complete!")
         self.setup_log.append(f"New name: {self.setup_name}")
         self.setup_log.append(f"Baud: {self.setup_baud.value}")
         self.setup_log.append("Mode: Peripheral")
